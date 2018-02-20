@@ -1,0 +1,218 @@
+<link rel="import" href="../polymer/polymer-element.html">
+
+<script>
+    (function () {
+
+        if (!self.Meledin)
+            self.Meledin = {};
+
+        /**
+         * Container for all the globals
+         */
+        Meledin.Globals = {
+            globals: {
+            },
+
+            paths: {
+            },
+
+            /**
+             * Registers an element for global path notifications.
+             */
+            register: function (elt, properties) {
+                let registeredProperties = [];
+
+                for (let k in properties) {
+                    let prop = properties[k];
+                    if (typeof(prop.global) == "undefined") {
+                        continue;
+                    }
+                    prop.__name = k;
+                    registeredProperties.push(prop);
+
+                    this.getPathMeta(prop.global).push({
+                        elt: elt,
+                        prop: prop
+                    });
+
+                    let val = this.get(prop.global);
+
+                    if (typeof (val) != "undefined") {
+                        elt[k] = val;
+                    } else if (prop.globalDefault) {
+                        elt[k] = prop.globalDefault;
+                    }
+
+                    // Set the global value as well.
+                    val = elt[k];
+                    if (typeof(val) != "undefined") {
+                        this.set(prop.global, val, elt);
+                    }
+
+                }
+
+                return (dataPending) => {
+                    for (var k in dataPending) {
+                        let path = k;
+                        let value = dataPending[k];
+                        registeredProperties.forEach(reg => {
+                            if (Polymer.Path.isAncestor(path, reg.__name) || path == reg.__name) {
+                                // A path notification needs to occur!
+                                // The incoming path is prefixed with the property.
+                                // It needs to be replaced with global path
+                                let translatedPath = Polymer.Path.translate(reg.__name, reg.global, path);
+                                Globals.set(translatedPath, value, elt);
+                            }
+                        });
+                    }
+                };
+            },
+
+            /**
+             * Removes any and all element links, cleaning up RAM.
+             */
+            unregister: function (elt) {
+                for (var k in this.paths) {
+                    let path = this.paths[k];
+                    this.paths[k] = path.filter(e => e.elt != elt);
+                }
+            },
+
+            get: function (key) {
+                return Polymer.Base.get(key, Globals.globals);
+            },
+
+            getPathMeta: function (path) {
+                return this.paths[path] = this.paths[path] || [];
+            },
+
+            set: function (path, value, elt) {
+
+                let exploded = Polymer.Path.split(path);
+                if (exploded.slice(-1) != "length" && exploded.slice(-1) != "splices") {
+
+                    // Disallow notifications of no updates.
+                    if (this.get(path) == value)
+                        return;
+
+                    // Save the value in the longest prefix.
+                    Polymer.Base.set(path, value, Globals.globals);
+                }
+
+                // Dispatch notifications.
+                // These should be sent to any path that is a PREFIX of path.
+                for (let k in this.paths) {
+
+                    // Skip anything that's not a prefix or equal
+                    if (!Polymer.Path.isAncestor(path, k) && k != path)
+                        continue;
+
+                    let regs = this.paths[k];
+                    regs.forEach(reg => {
+
+                        // Do not self-notify
+                        if (reg.elt == elt)
+                            return;
+
+                        // We need to remap the path to whatever it should be.
+                        let newPath = Polymer.Path.translate(k, reg.prop.__name, path);
+                        reg.elt.notifyPath(newPath, value);
+                    });
+
+                }
+
+            }
+
+        }
+
+
+        /**
+         * This mixin provides additional functionality to the properties declared in an element.
+         * When used, these properties can be considered "global", or effectively singletons. Furthermore,
+         * any change notifications will be properly propagated back and forth. This mixin is useful 
+         * to synchronise application state between multiple parts of an application.
+         * 
+         * # Usage
+         * The mixin reads the following fields from the `properties`:
+         * * `global`: A string representing a path to the property's value. This is a Polymer-style path, and all values are acceptable
+         * * `globalDefault`: A default value that will be assigned to the object if no global default value is set.
+         * 
+         * The global initialisation takes place on *attach* and will overwrite any properties already
+         * set on the object. A typical property definition can look as follows:
+         * 
+         * ```
+         * status: {
+         *   type: Object,
+         *   global: "status",
+         *   globalDefault: {}
+         * }
+         * ```
+         *  
+         * Any object that uses this mixin is then guaranteed to see the same `status` object, including
+         * the same properties. Any updates to the status object will be propagated and notified appropriately.
+         * Arrays work similarly; all copies of the following array will see their changes propagated:
+         * 
+         * ```
+         * arr: {
+         *   type: Array,
+         *   value: [],
+         *   global: "arr",
+         *   globalDefault: ["b"]
+         * },
+         * ```
+         * 
+         * # Limitations
+         * This mixin has three main limitations for the purposes of performance. First and foremost, it relies
+         * 100% on Polymer-type property notifications. That means it follows the same limitations as Polymer:
+         * setting direct properties on a Polymer element is supported; subproperties must be set using
+         * `Polymer.Base.set` (inherited by default from `Polymer.Element`), or using `Meledin.Globals.set`
+         * with the global path.
+         * 
+         * Second, while it will perform some limited propagation (e.g. array splices, and property subpaths),
+         * no guarantees are made on full subpath propagation. It's recommended to use the mixion on relatively
+         * simple objects and arrays, and avoid complex paths such as `foo.0.bar` (i.e. mixed array/object 
+         * or two-dimensional arrays).
+         * 
+         * Finally, there is no automatic path creation. For example, declaring a property to be global of
+         * `foo.bar.baz` will fail if `Meledin.Globals.get("foo")` and `Meledin.Globals.get("foo.bar")`
+         * return null. The way to fix this is to explicitly instantiate any complex paths on application
+         * start (or to use top-level paths).
+         * 
+         * This mixin provides *no functions*. All functionality is attached to the properties.
+         * 
+         * @polymer
+         * @mixinFunction
+         */
+        Meledin.Globals.Mixin = Polymer.dedupingMixin((base) =>
+
+            class extends base {
+                constructor() {
+                    super();
+                }
+
+                connectedCallback() {
+                    super.connectedCallback();
+                    let properties = this.__proto__.constructor.__properties;
+                    this.__globalPropertyNotifiers = Globals.register(this, properties);
+                }
+
+                disconnectedCallback() {
+                    super.disconnectedCallback();
+                    Globals.unregister(this);
+                }
+
+                /**
+                 * Called internally by Polymer to apply changes to properties. 
+                 * By intercepting this, we can notify the globals of changes to any path.
+                 */
+                _flushProperties() {
+                    // Perform all globals notifications.
+                    if (this.__globalPropertyNotifiers)
+                        this.__globalPropertyNotifiers(this.__dataPending);
+                    super._flushProperties();
+                }
+            }
+        );
+
+    })();
+</script>
